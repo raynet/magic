@@ -33,6 +33,25 @@ function magic($buffer) {
             $skip = false;
             if (strpos($row,'<head>')!==false) $head = true;
             if ($head) {
+                 // process HEAD   
+                 $skip = true;
+            } else {
+                // process BODY and rest
+                
+            }
+            if (strpos($row,'</head>')!==false) {
+                $head = false;
+            }
+            if (!$skip) $html .= $row."\n"; 
+        }
+        return $html;
+    }
+}
+
+/*
+            $skip = false;
+            if (strpos($row,'<head>')!==false) $head = true;
+            if ($head) {
                 // scanning head
                 if (strpos($row,'<link ')!==false && strpos($row,'type="application/')!==false) $skip = true;
                 if (strpos($row,'<script ')!==false && strpos($row,'src="')!==false) {
@@ -111,9 +130,7 @@ function magic($buffer) {
         }
         //$memcached->set($hash,$html,3600*24);
         return $html;
-    }
-}
-
+*/
 
 function get_web_page( $url )
 {
