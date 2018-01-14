@@ -1,5 +1,9 @@
 <?php
 include('params.php');
+require($m['libs'].'system.php');
+require($m['libs'].'vendor/autoload.php');
+
+use Masterminds\HTML5;
 
 ob_start("magic");
 // Execute the application.
@@ -7,15 +11,17 @@ $app->execute();
 ob_end_flush();
 
 function magic($buffer) {
+    global $m;
     $memcached = new Memcached();
-    $memcached->addServer("127.0.0.1", 11211);
-    $hash = sha1($buffer);
+    $memcached->addServer($m['memcached']['ip'], $m['memcached']['port']);
+    $hash = sha1_salt($buffer);
     $cached = $memcached->get($hash); 
     if (strlen($cached)>0) {
         // cached, return from memcached
         return $cached;
     } else {
         // generate page
+        $html5 = new HTML5();
         $tidy = new tidy;
         $tidy_params=array(
             'indent'=>TRUE,
@@ -24,144 +30,148 @@ function magic($buffer) {
         );
         $tidy->parseString($buffer, $tidy_params, 'utf8');
         $tidy->cleanRepair();
-        $rows = explode("\n",$tidy->html());
-        $html = '';
-        $head = false;
-        $css = '';
-        $js = '';
-        foreach ($rows as $i=>$row) {
+        
+        // processing for <head>
+        $head = tidy_get_head($tidy);
+        $html5 = new HTML5();
+        $dom = $html5->loadHTML($head);
+        // process head for javascript includes
+        $scripts = $dom->getElementsByTagName('script');
+        foreach ($scripts as $script) {
             $skip = false;
-            if (strpos($row,'<head>')!==false) $head = true;
-            if ($head) {
-                 // process HEAD   
-                 $skip = true;
+            $url = $script->getAttribute('src');
+            if (filter_var($url, FILTER_VALIDATE_URL) === false) {
+                // script via local filesystem, change to fetch over http
+                $url = $m['base'].$url;
+            }
+            $url_hash = sha1_salt($url);
+            $result = store_url($m['temp'].$url_hash,$url);
+            if ($result['errno']==0) {
+                $js_hash = md5_file($m['temp'].$url_hash);
+                $ext = '.js';
+                if (!file_exists($m['root'].$m['folders']['js'].$js_hash.$ext)) copy($m['temp'].$url_hash,$m['root'].$m['folders']['js'].$js_hash.$ext);
+                $url = $m['base'].$m['folders']['js'].$js_hash.$ext;
             } else {
-                // process BODY and rest
-                
+                $skip = true;
             }
-            if (strpos($row,'</head>')!==false) {
-                $head = false;
+            if (!$skip) {
+                // script at local cache, swap the src url
+                $script->setAttribute('src', $url);
             }
-            if (!$skip) $html .= $row."\n"; 
         }
-        return $html;
-    }
-}
-
-/*
+        // process head for <link>
+        $links = $dom->getElementsByTagName('link');
+        foreach ($links as $link) {
             $skip = false;
-            if (strpos($row,'<head>')!==false) $head = true;
-            if ($head) {
-                // scanning head
-                if (strpos($row,'<link ')!==false && strpos($row,'type="application/')!==false) $skip = true;
-                if (strpos($row,'<script ')!==false && strpos($row,'src="')!==false) {
-                    list($a,$url) = explode('src="',$row);
-                    $url = substr($url,1,strrpos($url,'"')-1);
-                    if (filter_var($url, FILTER_VALIDATE_URL) === false) {
-                        $url = substr($url,0,strrpos($url,'.js')).'.js';
-                        $item = file_get_contents($url);
-                        $skip = true;
-                    } else {
-                        return "error1";
-                    }
-                    $js .= $item."\n";
+            $url = $link->getAttribute('href');
+            $rel = $link->getAttribute('rel');
+            if (filter_var($url, FILTER_VALIDATE_URL) === false) {
+                // link via local filesystem, change to fetch over http
+                $url = $m['base'].$url;
+            }
+            if ($rel == 'stylesheet') {
+                $css = '@import url("'.$url.'");'."\n";
+                $css_hash = md5_salt($css);
+                $ext = '.css';
+                if (!file_exists($m['root'].$m['folders']['css'].$css_hash.$ext)) file_put_contents($m['root'].$m['folders']['css'].$css_hash.$ext,$css);
+                $url = $m['base'].$m['folders']['css'].$css_hash.$ext;
+            } else {
+                $url_hash = sha1_salt($url);
+                $filename = $m['temp'].$url_hash;
+                $result = store_url($filename,$url);
+                if ($result['errno']==0) {
+                    $js_hash = md5_file($m['temp'].$url_hash);
+                    $ext = get_file_extension($filename);
+                    if (!file_exists($m['root'].$m['folders']['img'].$js_hash.$ext)) copy($filename,$m['root'].$m['folders']['img'].$js_hash.$ext);
+                    $url = $m['base'].$m['folders']['img'].$js_hash.$ext;
+                } else {
+                    $skip = true;
                 }
-                if (strpos($row,'<link ')!==false && strpos($row,'rel="stylesheet"')!==false) {
-                    list($a,$url) = explode('href="',$row);
-                    $url = substr($url,1,strrpos($url,'"')-1);
-                    if (filter_var($url, FILTER_VALIDATE_URL) === false) {
-                        $item = "@import url('/$url');";
-                        $skip = true;
-                    } else {
-                        return 'error2';
-                    }
-                    $css .= $item."\n";
-                }
-                if (!$skip && strpos($row,'<link ')!==false && strpos($row,'href="')!==false) {
-                    list($a,$url) = explode('href="',$row);
-                    $url = substr($url,1,strpos($url,'"')-1);
-                    if (filter_var($url, FILTER_VALIDATE_URL) === false) {
-                        $img_hash = md5_file($url);
-                        $p = pathinfo($url);
-                        $ext = $p['extension'];
-                        if (!file_exists("img/$img_hash.$ext")) copy($url,"img/$img_hash.$ext");
-                        $row = strtr($row,array(
-                            $url => "img/$img_hash.$ext"
-                        ));
-                    } else {
-                        return 'error3';
-                    }
-                }
-                if (strpos($row,'</head>')!==false) {
-                    if (strlen($css)>0) {
-                        $css_hash = md5($css);
-                        if (!file_exists("css/$css_hash.css")) file_put_contents("css/$css_hash.css",$css);
-                        $html .= '    <link rel="stylesheet" href="'."/css/$css_hash.css".'" />'."\n";
-                    }
-                    if (strlen($js)>0) {
-                        $js_hash = md5($js);
-                        if (!file_exists("js/$js_hash.js")) file_put_contents("js/$js_hash.js",$js);
-                        $html .= '    <script src="'."/js/$js_hash.js".'" type="text/javascript"></script>'."\n";
-                    }
+            }
+            if (!$skip) {
+                // script at local cache, swap the src url
+                $link->setAttribute('href', $url);
+            }
+        }
+        $head = explode("\n",trim($html5->saveHTML($dom)));
+        array_shift($head);
+        array_shift($head);
+        array_pop($head);
+        
+        // processing for <body>
+        $body = tidy_get_body($tidy);
+        $html5 = new HTML5();
+        $dom = $html5->loadHTML($body);
+        // process <img> -tags on <body> for local cache and future optimization
+        $imgs = $dom->getElementsByTagName('img');
+        foreach($imgs as $img) {
+            $skip = false;
+            $url = $img->getAttribute('src');
+            if (filter_var($url, FILTER_VALIDATE_URL) === false) {
+                // image is on local filesystem, hash and copy to cache folder for further optimization
+                if ($url[0] == '/') $url = substr($url,1);
+                $filename = $m['root'].$url;
+                if (file_exists($filename)) {
+                    $img_hash = md5_file($filename);
+                    $ext = get_file_extension($filename);
+                    if (!file_exists($m['root'].$m['folders']['img'].$img_hash.$ext)) copy($filename,$m['root'].$m['folders']['img'].$img_hash.$ext);
+                    $url = $m['base'].$m['folders']['img'].$img_hash.$ext;
+                } else {
+                    $skip = true; // file not found, dont modify
                 }
             } else {
-                // scanning body
-                if (!$skip && strpos($row,'<img ')!==false && strpos($row,'src="')!==false) {
-                    list($a,$url) = explode('src="',$row);
-                    $url = substr($url,1,strpos($url,'"')-1);
-                    if (filter_var($url, FILTER_VALIDATE_URL) === false) {
-                        $img_hash = md5_file($url);
-                        $p = pathinfo($url);
-                        $ext = $p['extension'];
-                        if (!file_exists("img/$img_hash.$ext")) copy($url,"img/$img_hash.$ext");
-                        $row = strtr($row,array(
-                            $url => "img/$img_hash.$ext"
-                        ));
-                    } else {
-                        return "error4";
-                    }
+                // image is external, store it locally to cache folder for further optimization
+                $url_hash = sha1_salt($url);
+                $result = store_url($m['temp'].$url_hash,$url);
+                if ($result['errno']==0) {
+                    $img_hash = md5_file($m['temp'].$url_hash);
+                    $ext = get_file_extension($m['temp'].$url_hash);
+                    if (!file_exists($m['root'].$m['folders']['img'].$img_hash.$ext)) copy($m['temp'].$url_hash,$m['root'].$m['folders']['img'].$img_hash.$ext);
+                    $url = $m['base'].$m['folders']['img'].$img_hash.$ext;
+                } else {
+                    $skip = true; // download error, dont modify
+                }
+            }
+            if (!$skip) {
+                // image at local cache, swap the src url
+                $img->setAttribute('src', $url);
+            }
+        }
+        $body = explode("\n",trim($html5->saveHTML($dom)));
+        array_shift($body);
+        array_shift($body);
+        array_pop($body);
+        
+        // merge processed parts into the document
+        $document = '';
+        $html =  explode("\n",$tidy->html());
+        $skip = false;
+        foreach ($html as $i=>$row) {
+            if (strpos($row,'<head')!==false) {
+                $skip = true;
+                $document .= $row."\n".implode("\n",$head)."\n";
+            }
+            if (strpos($row,'<body')!==false) {
+                $skip = true;
+                $document .= $row."\n".implode("\n",$body)."\n";
+            }
+            
+            if (!$skip) {
+                $document .= $row."\n";
+            }            
+            if ($skip) {
+                if (strpos($row,'</head>')!==false) {
+                    $skip = false;
+                    $document .= $row."\n";
+                }
+                if (strpos($row,'</body>')!==false) {
+                    $skip = false;
+                    $document .= $row."\n";
                 }
             }
             
-            if (strpos($row,'</head>')!==false) {
-                $head = false;
-            }
-            if (!$skip) $html .= $row."\n";            
         }
-        //$memcached->set($hash,$html,3600*24);
-        return $html;
-*/
-
-function get_web_page( $url )
-{
-    $user_agent='Mozilla/5.0 (Windows NT 6.1; rv:8.0) Gecko/20100101 Firefox/8.0';
-    $options = array(
-        CURLOPT_CUSTOMREQUEST  =>"GET",        //set request type post or get
-        CURLOPT_POST           =>false,        //set to GET
-        CURLOPT_USERAGENT      => $user_agent, //set user agent
-        CURLOPT_COOKIEFILE     =>"/tmp/cookie.txt", //set cookie file
-        CURLOPT_COOKIEJAR      =>"/tmp/cookie.txt", //set cookie jar
-        CURLOPT_RETURNTRANSFER => true,     // return web page
-        CURLOPT_HEADER         => false,    // don't return headers
-        CURLOPT_FOLLOWLOCATION => true,     // follow redirects
-        CURLOPT_ENCODING       => "",       // handle all encodings
-        CURLOPT_AUTOREFERER    => true,     // set referer on redirect
-        CURLOPT_CONNECTTIMEOUT => 120,      // timeout on connect
-        CURLOPT_TIMEOUT        => 120,      // timeout on response
-        CURLOPT_MAXREDIRS      => 10,       // stop after 10 redirects
-        CURLOPT_SSL_VERIFYHOST => 0,
-        CURLOPT_SSL_VERIFYPEER => 0,
-    );
-    
-    $ch      = curl_init( $url );
-    curl_setopt_array( $ch, $options );
-    $content = curl_exec( $ch );
-    $err     = curl_errno( $ch );
-    $errmsg  = curl_error( $ch );
-    $header  = curl_getinfo( $ch );
-    curl_close( $ch );
-    $header['errno']   = $err;
-    $header['errmsg']  = $errmsg;
-    $header['content'] = $content;
-    return $header;
+        $memcached->set($hash,$document,3600*24);
+        return $document;
+    }
 }

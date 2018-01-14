@@ -1,0 +1,7 @@
+<?php
+
+$sites = array(
+    '<name>' => '<path to site folder>',
+);
+
+?>
